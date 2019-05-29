@@ -1,0 +1,9 @@
+*.exe
+*.dll
+.vs
+.idea
+cmake-*
+CMakeSettings.json*
+/autopunch-loader/dll*.go
+/autopunch-loader/address.go
+*.syso
