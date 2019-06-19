@@ -78,6 +78,8 @@ int(WINAPI *actual_recvfrom)(SOCKET s, char *buf, int len, int flags, struct soc
 int(WINAPI *actual_sendto)(SOCKET s, const char *buf, int len, int flags, const struct sockaddr *to, int tolen) = sendto;
 int(WINAPI *actual_bind)(SOCKET s, const struct sockaddr *name, int namelen) = bind;
 int(WINAPI *actual_closesocket)(SOCKET s) = closesocket;
+int(WINAPI *actual_WSARecvFrom)(SOCKET s, LPWSABUF buffers, DWORD buffers_count, LPDWORD bytes_sent, LPDWORD flags, struct sockaddr *from, int *fromlen, LPWSAOVERLAPPED overlapped, LPWSAOVERLAPPED_COMPLETION_ROUTINE completion_routine) = WSARecvFrom;
+int(WINAPI *actual_WSASendTo)(SOCKET s, LPWSABUF buffers, DWORD buffers_count, LPDWORD bytes_sent, DWORD flags, const struct sockaddr *to, int tolen, LPWSAOVERLAPPED overlapped, 	LPWSAOVERLAPPED_COMPLETION_ROUTINE completion_routine) = WSASendTo;
 
 DWORD WINAPI relay(void *data) {
 	while (!relay_close) {
@@ -126,6 +128,23 @@ DWORD WINAPI relay(void *data) {
 	return 0;
 }
 
+int WINAPI my_WSARecvFrom(SOCKET s, LPWSABUF buffers, DWORD buffers_count, LPDWORD bytes_sent, LPDWORD flags, struct sockaddr *from, int *fromlen, LPWSAOVERLAPPED overlapped, LPWSAOVERLAPPED_COMPLETION_ROUTINE completion_routine) {
+	struct sockaddr_in *addr = (struct sockaddr_in *)from;
+	struct socket_data *socket_data = NULL;
+	WaitForSingleObject(sockets_mutex, INFINITE);
+	for (int i = 0; i < sockets_len; ++i) {
+		socket_data = &sockets[i];
+		if (socket_data->s == s) {
+			break;
+		}
+	}
+	ReleaseMutex(sockets_mutex);
+	if (!socket_data) {
+		DEBUG_LOG("recvfrom error unknown socket")
+		return actual_WSARecvFrom(s, buffers, buffers_count, bytes_sent, flags, from, fromlen, overlapped, completion_routine); // TODO error handling
+	}
+}
+
 int WINAPI my_recvfrom(SOCKET s, char *out_buf, int len, int flags, struct sockaddr *from, int *fromlen) {
 	struct sockaddr_in *addr = (struct sockaddr_in *)from;
 	struct socket_data *socket_data = NULL;
@@ -142,9 +161,10 @@ int WINAPI my_recvfrom(SOCKET s, char *out_buf, int len, int flags, struct socka
 		return actual_recvfrom(s, out_buf, len, flags, from, fromlen); // TODO error handling
 	}
 	
+	char buf_data[8];
 	char *buf;
 	if(len < 8) {
-		buf = malloc(8);
+		buf = buf_data;
 	} else {
 		buf = out_buf;
 	}
@@ -159,7 +179,7 @@ int WINAPI my_recvfrom(SOCKET s, char *out_buf, int len, int flags, struct socka
 				continue;
 			}
 			DEBUG_LOG("recvfrom error=%d", err)
-			return err;
+			return n;
 		}
 		if (addr->sin_addr.s_addr == relay_addr.sin_addr.s_addr && addr->sin_port == relay_addr.sin_port) {
 			if (n % 8) {
@@ -266,6 +286,110 @@ int WINAPI my_recvfrom(SOCKET s, char *out_buf, int len, int flags, struct socka
 	}
 }
 
+int WINAPI my_WSASendTo(SOCKET s, LPWSABUF buffers, DWORD buffers_count, LPDWORD bytes_sent, DWORD flags, const struct sockaddr *to, int tolen, LPWSAOVERLAPPED overlapped, 	LPWSAOVERLAPPED_COMPLETION_ROUTINE completion_routine) {
+	int len = 0;
+	for (int i = 0; i < buffers_count; ++i) {
+		len += buffers[i].len;
+	}
+	if(buffers_count > 0 && buffers[0].len > 0) {
+		DEBUG_LOG("WSAsendto start socket=%zu len=%d buf[0]=%d", s, len, buffers[0].buf[0])
+	} else {
+		DEBUG_LOG("WSAsendto start socket=%zu len=%d (empty)", s, len)
+	}
+	if (to->sa_family != AF_INET) {
+		DEBUG_LOG("WSAsendto mapping sa_family != AF_INET: %d", to->sa_family)
+		return actual_WSASendTo(s, buffers, buffers_count, bytes_sent, flags, to, tolen, overlapped, completion_routine);
+	}
+	struct socket_data *socket_data = NULL;
+	WaitForSingleObject(sockets_mutex, INFINITE);
+	for (int i = 0; i < sockets_len; ++i) {
+		socket_data = &sockets[i];
+		if (socket_data->s == s) {
+			break;
+		}
+	}
+	ReleaseMutex(sockets_mutex);
+	if (!socket_data) {
+		DEBUG_LOG("WSAsendto error unknown socket")
+		return actual_WSASendTo(s, buffers, buffers_count, bytes_sent, flags, to, tolen, overlapped, completion_routine); // TODO error?
+	}
+	WaitForSingleObject(socket_data->mutex, INFINITE);
+	const struct sockaddr_in *dest = (const struct sockaddr_in *)to;
+	for (int i = 0; i < socket_data->mappings_len; ++i) {
+		struct mapping *mapping = &socket_data->mappings[i];
+		if (mapping->addr.sin_addr.s_addr != dest->sin_addr.s_addr) {
+			continue;
+		}
+		if (mapping->port != dest->sin_port) {
+			DEBUG_LOG("WSAsendto mapping port mismatch mapping=%d dest=%d", ntohs(mapping->port), ntohs(dest->sin_port))
+			continue;
+		}
+		clock_t now = clock();
+		mapping->last_refresh = now;
+		mapping->last_send = now;
+		DEBUG_LOG("WSAsendto mapping used old=%d replaced=%d", ntohs(dest->sin_port), ntohs(mapping->addr.sin_port))
+		int r = actual_WSASendTo(s, buffers, buffers_count, bytes_sent, flags, (struct sockaddr *)mapping, tolen, overlapped, completion_routine); // TODO error?
+		ReleaseMutex(socket_data->mutex);
+		return r;
+	}
+	DEBUG_LOG("WSAsendto unknown mapping for port=%d sending to peer and relay", ntohs(dest->sin_port))
+	int r = actual_WSASendTo(s, buffers, buffers_count, bytes_sent, flags, to, tolen, overlapped, completion_routine);
+	int err = WSAGetLastError();
+	
+	int refresh = -1;
+	clock_t now = clock();
+	for (int i = 0; i < socket_data->transient_peers_len; ++i) {
+		struct transient_peer *peer = &socket_data->transient_peers[i];
+		if((now - peer->last) / CLOCKS_PER_SEC > 10) { // transient peer timeout
+			socket_data->transient_peers[i--] = socket_data->transient_peers[--socket_data->transient_peers_len];
+			continue;
+		}
+		if (peer->addr.sin_addr.s_addr != dest->sin_addr.s_addr) {
+			continue;
+		}
+		if (peer->addr.sin_port != dest->sin_port) {
+			DEBUG_LOG("WSAsendto transient port mismatch transient=%d dest=%d", ntohs(peer->addr.sin_port), ntohs(dest->sin_port))
+			continue;
+		}
+		refresh = (now - peer->last) * 1000 / CLOCKS_PER_SEC > 500;
+		if(refresh) {
+			peer->last = now;
+		}
+		DEBUG_LOG("WSAsendto transient found, refresh=%d now=%ld last=%ld", refresh, now, peer->last)
+	}
+	if(refresh == -1) {
+		if (socket_data->transient_peers_len == socket_data->transient_peers_cap) {
+			socket_data->transient_peers_cap = socket_data->transient_peers_cap ? socket_data->transient_peers_cap * 2 : 8;
+			socket_data->transient_peers = realloc(socket_data->transient_peers, socket_data->transient_peers_cap * sizeof(socket_data->transient_peers[0]));
+		}
+		socket_data->transient_peers[socket_data->transient_peers_len++] = (struct transient_peer) {
+			.addr = (struct sockaddr_in) {
+				.sin_family = AF_INET,
+				.sin_port = dest->sin_port,
+				.sin_addr.s_addr = dest->sin_addr.s_addr,
+			},
+			.last = now,
+		};
+		refresh = true;
+		DEBUG_LOG("WSAsendto transient created len=%zu cap=%zu", socket_data->transient_peers_len, socket_data->transient_peers_cap)
+	}
+	
+	if(refresh) {
+		char relay_buf[] = {((char*)&(socket_data->port))[0], ((char*)&(socket_data->port))[1], dest->sin_addr.S_un.S_un_b.s_b1, dest->sin_addr.S_un.S_un_b.s_b2,
+												dest->sin_addr.S_un.S_un_b.s_b3, dest->sin_addr.S_un.S_un_b.s_b4, ((char*)&(dest->sin_port))[0], ((char*)&(dest->sin_port))[1]};
+		struct _WSABUF relay_bufs = {
+			.len = sizeof(relay_buf),
+			.buf = relay_buf,
+		};
+		DWORD relay_bytes_sent;
+		actual_WSASendTo(s, &relay_bufs, 1, &relay_bytes_sent, 0, (struct sockaddr *)&relay_addr, sizeof(relay_addr), NULL, NULL);
+		WSASetLastError(err);
+		DEBUG_LOG("WSAsendto transient refreshed; sent to relay")
+	}
+	ReleaseMutex(socket_data->mutex);
+	return r;
+}
+
 int WINAPI my_sendto(SOCKET s, const char *buf, int len, int flags, const struct sockaddr *to, int tolen) {
 	if(len) {
 		DEBUG_LOG("sendto start socket=%zu len=%d buf[0]=%d", s, len, buf[0])
@@ -310,6 +434,7 @@ int WINAPI my_sendto(SOCKET s, const char *buf, int len, int flags, const struct
 	}
 	DEBUG_LOG("sendto unknown mapping for port=%d sending to peer and relay", ntohs(dest->sin_port))
 	int r = actual_sendto(s, buf, len, flags, to, tolen);
+	int err = WSAGetLastError();
 	
 	int refresh = -1;
 	clock_t now = clock();
@@ -353,6 +478,7 @@ int WINAPI my_sendto(SOCKET s, const char *buf, int len, int flags, const struct
 		char relay_buf[] = {((char*)&(socket_data->port))[0], ((char*)&(socket_data->port))[1], dest->sin_addr.S_un.S_un_b.s_b1, dest->sin_addr.S_un.S_un_b.s_b2,
 												dest->sin_addr.S_un.S_un_b.s_b3, dest->sin_addr.S_un.S_un_b.s_b4, ((char*)&(dest->sin_port))[0], ((char*)&(dest->sin_port))[1]};
 		actual_sendto(s, relay_buf, sizeof(relay_buf), 0, (struct sockaddr *)&relay_addr, sizeof(relay_addr));
+		WSASetLastError(err);
 		DEBUG_LOG("sendto transient refreshed; sent to relay")
 	}
 	ReleaseMutex(socket_data->mutex);
@@ -371,6 +497,16 @@ int WINAPI my_bind(SOCKET s, const struct sockaddr *name, int namelen) {
 		DEBUG_LOG("bind actual failed %d", r)
 		return r;
 	}
+	int socket_type;
+	int socket_type_length = sizeof(socket_type);
+	if (getsockopt(s, SOL_SOCKET, SO_TYPE, (char *)&socket_type, &socket_type_length)) {
+		DEBUG_LOG("bind getsockopt error %d", WSAGetLastError())
+		return r;
+	}
+	if (socket_type != SOCK_DGRAM) {
+		DEBUG_LOG("bind ignoring non-datagram socket %d", socket_type)
+		return r;
+	}
 	struct sockaddr_in local_addr;
 	socklen_t local_addr_len = sizeof(local_addr);
 	if (getsockname(s, (struct sockaddr *)&local_addr, &local_addr_len)) {
@@ -378,7 +514,7 @@ int WINAPI my_bind(SOCKET s, const struct sockaddr *name, int namelen) {
 		return r;
 	}
 	if (local_addr.sin_family != AF_INET) {
-		DEBUG_LOG("bind getsockname socket is not AF_INET %d", local_addr.sin_family)
+		DEBUG_LOG("bind ignoring non-AF_INET socket %d", local_addr.sin_family)
 		return r;
 	}
 	DEBUG_LOG("bind local port is %d %d", local_addr.sin_family, ntohs(local_addr.sin_port))
@@ -449,6 +585,8 @@ void load() {
 	DetourAttach((void **)&actual_sendto, my_sendto);
 	DetourAttach((void **)&actual_bind, my_bind);
 	DetourAttach((void **)&actual_closesocket, my_closesocket);
+	DetourAttach((void **)&actual_WSARecvFrom, my_WSARecvFrom);
+	DetourAttach((void **)&actual_WSASendTo, my_WSASendTo);
 	DetourTransactionCommit();
 
 	u_long relay_ip_net = htonl(relay_ip);

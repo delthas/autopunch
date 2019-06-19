@@ -65,6 +65,10 @@ func main() {
 			// err is thrown if the buffer is too small
 			continue
 		}
+		if n == 1 {
+			c.WriteToUDP(buffer[:n], addr)
+			continue
+		}
 		if n != 2 && n != 8 {
 			continue
 		}
