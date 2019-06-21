@@ -24,9 +24,7 @@ add_library(autopunch MODULE
 target_include_directories(autopunch PRIVATE detours/src)
 target_link_libraries(autopunch PRIVATE ws2_32)
 target_compile_definitions(autopunch PRIVATE -DWIN32_LEAN_AND_MEAN -D_CRT_SECURE_NO_WARNINGS)
-target_compile_options(autopunch PRIVATE
-        "$<$<CONFIG:DEBUG>:/MTd>"
-        "$<$<NOT:$<CONFIG:DEBUG>>:/MT>")
+target_compile_options(autopunch PRIVATE)
 
 if(CMAKE_SIZEOF_VOID_P EQUAL 8)
     set(TARGET_FILE_BITS 64)

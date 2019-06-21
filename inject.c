@@ -65,14 +65,15 @@ struct socket_data {
 	struct transient_peer *transient_peers;
 	size_t transient_peers_len;
 	size_t transient_peers_cap;
+	struct iocp_key **iocp_keys;
+	size_t iocp_keys_len;
+	size_t iocp_keys_cap;
 };
 
 struct socket_data *sockets;
 size_t sockets_len;
 size_t sockets_cap;
 HANDLE sockets_mutex;
-
-HANDLE relay_thread;
 
 struct pending_iocp {
 		SOCKET socket;
@@ -82,6 +83,7 @@ struct pending_iocp {
 struct pending_iocp *pending_iocps;
 size_t pending_iocps_len;
 size_t pending_iocps_cap;
+HANDLE pending_iocps_mutex;
 
 struct iocp_key {
 		HANDLE iocp;
@@ -99,6 +101,7 @@ struct iocp_overlapped {
 
 struct iocp_overlapped_recv {
 		struct iocp_overlapped type;
+		HANDLE thread;
 		LPWSABUF buffers;
 		DWORD buffers_count;
 		LPDWORD bytes_sent;
@@ -117,7 +120,6 @@ struct iocp_overlapped_send {
 };
 
 HANDLE iocp;
-HANDLE receive_thread;
 
 bool close;
 
@@ -143,6 +145,10 @@ DWORD WINAPI relay(void *data) {
 				CloseHandle(socket_data->mutex);
 				free(socket_data->mappings);
 				free(socket_data->transient_peers);
+				for (int j = 0; j < socket_data->iocp_keys_len; ++j) {
+					free(socket_data->iocp_keys[j]);
+				}
+				free(socket_data->iocp_keys);
 				sockets[i--] = sockets[--sockets_len];
 				continue;
 			}
@@ -190,6 +196,7 @@ struct socket_data *find_socket_data(SOCKET s) {
 }
 
 void associate_iocp(SOCKET s) {
+	WaitForSingleObject(pending_iocps_mutex, INFINITE);
 	for (int i = 0; i < pending_iocps_len; ++i) {
 		struct pending_iocp *pending_iocp = &pending_iocps[i];
 		if (pending_iocp->socket != s) {
@@ -199,6 +206,7 @@ void associate_iocp(SOCKET s) {
 		actual_CreateIoCompletionPort((HANDLE) pending_iocp->socket, pending_iocp->iocp, pending_iocp->key, 0);
 		pending_iocps[i--] = pending_iocps[--pending_iocps_len];
 	}
+	ReleaseMutex(pending_iocps_mutex);
 }
 
 bool inject_receive(struct socket_data *socket_data, struct sockaddr_in *addr, int n, const char *buf) { // true means to forward the packet, false to continue
@@ -306,6 +314,7 @@ bool inject_receive(struct socket_data *socket_data, struct sockaddr_in *addr, i
 // TODO createiocp if needed (add in all funs) WSASendMsg WSASendTo WSASend WSARecvFrom WSARecvMsg WSARecv
 
 int WINAPI my_WSARecvFrom(SOCKET s, LPWSABUF out_buffers, DWORD out_buffers_count, LPDWORD bytes_sent, LPDWORD flags, struct sockaddr *from, int *fromlen, LPWSAOVERLAPPED overlapped, LPWSAOVERLAPPED_COMPLETION_ROUTINE completion_routine) {
+	// TODO from could be null
 	struct sockaddr_in *addr = (struct sockaddr_in *)from;
 	struct socket_data *socket_data = find_socket_data(s);
 	if (!socket_data) {
@@ -319,9 +328,9 @@ int WINAPI my_WSARecvFrom(SOCKET s, LPWSABUF out_buffers, DWORD out_buffers_coun
 		len += out_buffers[i].len;
 	}
 	if(out_buffers_count > 0 && out_buffers[0].len > 0) {
-		DEBUG_LOG("WSAsendto start socket=%zu len=%d buf[0]=%d", s, len, out_buffers[0].buf[0])
+		DEBUG_LOG("wsarecvfrom start socket=%zu len=%d buf[0]=%d", s, len, out_buffers[0].buf[0])
 	} else {
-		DEBUG_LOG("WSAsendto start socket=%zu len=%d (empty)", s, len)
+		DEBUG_LOG("wsarecvfrom start socket=%zu len=%d (empty)", s, len)
 	}
 
 	if(overlapped == NULL && completion_routine == NULL) {
@@ -340,7 +349,7 @@ int WINAPI my_WSARecvFrom(SOCKET s, LPWSABUF out_buffers, DWORD out_buffers_coun
 			buffers_count = out_buffers_count;
 		}
 
-		DEBUG_LOG("wsarecvfrom_start len=%d flags=%d", len, flags)
+		DEBUG_LOG("wsarecvfrom_start len=%d flags=%lu", len, *flags)
 		while (true) {
 			int n = actual_WSARecvFrom(s, buffers, buffers_count, bytes_sent, flags, from, fromlen, NULL, NULL);
 			DEBUG_LOG("wsarecvfrom actual n=%d", n)
@@ -383,6 +392,9 @@ int WINAPI my_WSARecvFrom(SOCKET s, LPWSABUF out_buffers, DWORD out_buffers_coun
 	inject_overlapped->fromlen = fromlen;
 	inject_overlapped->overlapped = overlapped;
 	inject_overlapped->routine = completion_routine;
+	if(!DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentThread(), &inject_overlapped->thread, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+		DEBUG_LOG("wsarecvfrom DuplicateHandle error=%lu", GetLastError())
+	}
 
 	LPWSABUF buffers;
 	DWORD buffers_count;
@@ -533,7 +545,6 @@ int WINAPI my_WSASendTo(SOCKET s, LPWSABUF buffers, DWORD buffers_count, LPDWORD
 		return actual_WSASendTo(s, buffers, buffers_count, bytes_sent, flags, to, tolen, overlapped, completion_routine); // TODO error?
 	}
 	if (to->sa_family != AF_INET) {
-		// TODO trigger iocp (wrap overlap in inject overlapped)
 		struct iocp_overlapped_send *overlapped_send = calloc(1, sizeof(*overlapped_send));
 		overlapped_send->type.type = OVERLAPPED_TYPE_SEND;
 		overlapped_send->overlapped = overlapped;
@@ -627,31 +638,40 @@ int WINAPI my_bind(SOCKET s, const struct sockaddr *name, int namelen) {
 	}
 	DEBUG_LOG("bind local port is %d %d", local_addr.sin_family, ntohs(local_addr.sin_port))
 
+	WaitForSingleObject(sockets_mutex, INFINITE);
+	if (sockets_len == sockets_cap) {
+		sockets_cap = sockets_cap ? sockets_cap * 2 : 8;
+		sockets = realloc(sockets, sockets_cap * sizeof(sockets[0]));
+	}
+	struct socket_data *socket_data = &sockets[sockets_len++];
+	*socket_data = (struct socket_data){
+		.s = s,
+		.port = local_addr.sin_port,
+		.mutex = CreateMutex(NULL, FALSE, NULL),
+	};
+
+	WaitForSingleObject(pending_iocps_mutex, INFINITE);
 	for (int i = 0; i < pending_iocps_len; ++i) {
 		struct pending_iocp *pending_iocp = &pending_iocps[i];
 		if (pending_iocp->socket != s) {
 			continue;
 		}
 		// TODO check err
-		// TODO free iocp_key
 		struct iocp_key *key = malloc(sizeof(*key));
 		key->socket = s;
 		key->iocp = pending_iocp->iocp;
 		key->key = pending_iocp->key;
-		actual_CreateIoCompletionPort((HANDLE) pending_iocp->socket, iocp, (ULONG_PTR)key, 0);
+		actual_CreateIoCompletionPort((HANDLE)s, iocp, (ULONG_PTR)key, 0);
 		pending_iocps[i--] = pending_iocps[--pending_iocps_len];
-	}
 
-	WaitForSingleObject(sockets_mutex, INFINITE);
-	if (sockets_len == sockets_cap) {
-		sockets_cap = sockets_cap ? sockets_cap * 2 : 8;
-		sockets = realloc(sockets, sockets_cap * sizeof(sockets[0]));
+		if (socket_data->iocp_keys_len == socket_data->iocp_keys_cap) {
+			socket_data->iocp_keys_cap = socket_data->iocp_keys_cap ? socket_data->iocp_keys_cap * 2 : 4;
+			socket_data->iocp_keys = realloc(socket_data->iocp_keys, socket_data->iocp_keys_cap * sizeof(socket_data->iocp_keys[0]));
+		}
+		socket_data->iocp_keys[socket_data->iocp_keys_len++] = key;
 	}
-	sockets[sockets_len++] = (struct socket_data){
-		.s = s,
-		.port = local_addr.sin_port,
-		.mutex = CreateMutex(NULL, FALSE, NULL),
-	};
+	ReleaseMutex(pending_iocps_mutex);
+
 	DEBUG_LOG("bind add socket socket=%zu mappings=%zu closed=%d, len=%zu cap=%zu", sockets[sockets_len - 1].s, (size_t)sockets[sockets_len - 1].mappings,
 		sockets[sockets_len - 1].closed, sockets[sockets_len - 1].mappings_len, sockets[sockets_len - 1].mappings_cap)
 	DEBUG_LOG("bind added socket %zu, len=%zu cap=%zu", s, sockets_len, sockets_cap)
@@ -667,9 +687,18 @@ int WINAPI my_closesocket(SOCKET s) {
 	}
 	struct socket_data *socket_data = find_socket_data(s);
 	if (!socket_data) {
-		DEBUG_LOG("close error unknown socket, err=%d", r)
+		DEBUG_LOG("close unknown socket")
+		WaitForSingleObject(pending_iocps_mutex, INFINITE);
+		for (int i = 0; i < pending_iocps_len; ++i) {
+			if (pending_iocps[i].socket != s) {
+				continue;
+			}
+			pending_iocps[i--] = pending_iocps[--pending_iocps_len];
+		}
+		ReleaseMutex(pending_iocps_mutex);
 		return r;
 	}
+
 	// TODO free iocp key
 	WaitForSingleObject(socket_data->mutex, INFINITE);
 	socket_data->closed = true;
@@ -679,25 +708,61 @@ int WINAPI my_closesocket(SOCKET s) {
 }
 
 HANDLE WINAPI my_CreateIoCompletionPort(HANDLE FileHandle, HANDLE ExistingCompletionPort, ULONG_PTR CompletionKey, DWORD NumberOfConcurrentThreads) {
-	if(ExistingCompletionPort == NULL) {
+	if(FileHandle == NULL || ExistingCompletionPort == NULL) {
 		return actual_CreateIoCompletionPort(FileHandle, ExistingCompletionPort, CompletionKey, NumberOfConcurrentThreads);
 	}
+	SOCKET socket = (SOCKET) FileHandle;
 	int type = -1;
 	int length = sizeof(type);
-	getsockopt((SOCKET)FileHandle, SOL_SOCKET, SO_TYPE, (char *)&type, &length);
-	if(type != SOCK_DGRAM) {
+	int err = getsockopt(socket, SOL_SOCKET, SO_TYPE, (char *)&type, &length);
+	if(err || type != SOCK_DGRAM) {
 		return actual_CreateIoCompletionPort(FileHandle, ExistingCompletionPort, CompletionKey, NumberOfConcurrentThreads);
 	}
+
+	struct socket_data *socket_data = find_socket_data(socket);
+	if(socket_data != NULL) {
+		WaitForSingleObject(socket_data->mutex, INFINITE);
+		struct iocp_key *key = malloc(sizeof(*key));
+		key->socket = socket;
+		key->iocp = ExistingCompletionPort;
+		key->key = CompletionKey;
+		actual_CreateIoCompletionPort(FileHandle, iocp, (ULONG_PTR)key, 0);
+
+		if (socket_data->iocp_keys_len == socket_data->iocp_keys_cap) {
+			socket_data->iocp_keys_cap = socket_data->iocp_keys_cap ? socket_data->iocp_keys_cap * 2 : 4;
+			socket_data->iocp_keys = realloc(socket_data->iocp_keys, socket_data->iocp_keys_cap * sizeof(socket_data->iocp_keys[0]));
+		}
+		socket_data->iocp_keys[socket_data->iocp_keys_len++] = key;
+		ReleaseMutex(socket_data->mutex);
+		return iocp;
+	}
+	
+	WaitForSingleObject(pending_iocps_mutex, INFINITE);
 	if (pending_iocps_len == pending_iocps_cap) {
 		pending_iocps_cap = pending_iocps_cap ? pending_iocps_cap * 2 : 8;
 		pending_iocps = realloc(pending_iocps, pending_iocps_cap * sizeof(pending_iocps[0]));
 	}
 	pending_iocps[pending_iocps_len++] = (struct pending_iocp){
-					.socket = (SOCKET)FileHandle,
+					.socket = socket,
 					.iocp = ExistingCompletionPort,
 					.key = CompletionKey,
 	};
+	ReleaseMutex(pending_iocps_mutex);
 	return iocp;
+}
+
+struct apc_callback_data {
+		LPWSAOVERLAPPED_COMPLETION_ROUTINE routine;
+		int err;
+		DWORD n;
+		LPWSAOVERLAPPED overlapped;
+		DWORD flags;
+};
+
+void apc_callback(ULONG_PTR data) {
+	struct apc_callback_data *callback_data = (struct apc_callback_data *)data;
+	callback_data->routine(callback_data->err, callback_data->n, callback_data->overlapped, callback_data->flags);
+	free(callback_data);
 }
 
 DWORD WINAPI receive(void *data) {
@@ -721,34 +786,49 @@ DWORD WINAPI receive(void *data) {
 			struct iocp_overlapped_recv *overlapped = (struct iocp_overlapped_recv *)overlapped_;
 			struct sockaddr_in *addr = (struct sockaddr_in *) overlapped->from;
 
-			// TODO what to do if n < 0?
-			// TODO get socket data!
-			// TODO socket mutexes
+			if(n < 0 && err == WSAECONNRESET) { // ignore connection reset errors (can happen if relay is down)
+					DEBUG_LOG("recvfrom skipped error=%d", err)
+					actual_WSARecvFrom(key->socket, overlapped->buffers, overlapped->buffers_count, overlapped->bytes_sent, overlapped->flags, overlapped->from, overlapped->fromlen, (LPWSAOVERLAPPED) overlapped, NULL);
+					continue;
+			}
 
-			if(!inject_receive(socket_data, addr, n, overlapped->buffers[0].buf)) {
-				actual_WSARecvFrom(key->socket, overlapped->buffers, overlapped->buffers_count, overlapped->bytes_sent, overlapped->flags, overlapped->from, overlapped->fromlen, (LPWSAOVERLAPPED) overlapped, NULL);
-			} else {
-				if(overlapped->buf_data_used) {
-					int r = 0;
-					for (int i = 0; i < overlapped->buffers_count && r < n; ++i) {
-						if(overlapped->buffers[i].len >= n - r) {
-							memcpy(overlapped->buffers[i].buf, &overlapped->buf_data[r], n - r);
-							break;
-						} else {
-							memcpy(overlapped->buffers[i].buf, &overlapped->buf_data[r], overlapped->buffers[i].len);
-							r += overlapped->buffers[i].len;
-						}
+			if(n >= 0) {
+				struct socket_data *socket_data = find_socket_data(key->socket);
+				if(socket_data != NULL && !inject_receive(socket_data, addr, n, overlapped->buffers[0].buf)) {
+					actual_WSARecvFrom(key->socket, overlapped->buffers, overlapped->buffers_count, overlapped->bytes_sent, overlapped->flags, overlapped->from, overlapped->fromlen, (LPWSAOVERLAPPED) overlapped, NULL);
+					continue;
+				}
+			}
+
+			if(overlapped->buf_data_used) {
+				int r = 0;
+				for (int i = 0; i < overlapped->buffers_count && r < n; ++i) {
+					if(overlapped->buffers[i].len >= n - r) {
+						memcpy(overlapped->buffers[i].buf, &overlapped->buf_data[r], n - r);
+						break;
+					} else {
+						memcpy(overlapped->buffers[i].buf, &overlapped->buf_data[r], overlapped->buffers[i].len);
+						r += overlapped->buffers[i].len;
 					}
 				}
+			}
 
-				PostQueuedCompletionStatus(key->iocp, n, key->key, overlapped->overlapped);
-				if(overlapped->routine == NULL) {
-					if(overlapped->overlapped->hEvent != NULL) {
-						WSASetEvent(overlapped->overlapped->hEvent);
-					}
-				} else {
-					// TODO must be scheduled to be run in alertable state?
-					overlapped->routine(err /* TODO */, n, overlapped->overlapped, *overlapped->flags);
+			PostQueuedCompletionStatus(key->iocp, n, key->key, overlapped->overlapped);
+			if(overlapped->routine == NULL) {
+				if(overlapped->overlapped->hEvent != NULL) {
+					WSASetEvent(overlapped->overlapped->hEvent);
+				}
+			} else if(overlapped->thread != NULL) {
+				struct apc_callback_data *callback_data = malloc(sizeof(*callback_data));
+				callback_data->routine = overlapped->routine;
+				callback_data->err = err; /* TODO */
+				callback_data->n = n;
+				callback_data->overlapped = overlapped->overlapped;
+				callback_data->flags = *overlapped->flags;
+				// TODO check that queueuserapc actually works for WSA wait calls
+				if(!QueueUserAPC(apc_callback, overlapped->thread, (ULONG_PTR)callback_data)) {
+					free(callback_data);
+					DEBUG_LOG("QueueUserAPC error: %d", GetLastError())
 				}
 			}
 
@@ -777,6 +857,16 @@ void load() {
 
 	DEBUG_LOG("load_start")
 
+	u_long relay_ip_net = htonl(relay_ip);
+	u_short relay_port_net = htons(relay_port);
+	relay_addr = (struct sockaddr_in){.sin_family = AF_INET, .sin_port = relay_port_net, .sin_addr.s_addr = relay_ip_net};
+
+	iocp = actual_CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 1);
+	sockets_mutex = CreateMutex(NULL, FALSE, NULL);
+	pending_iocps_mutex = CreateMutex(NULL, FALSE, NULL);
+	CloseHandle(CreateThread(NULL, 0, relay, NULL, 0, NULL));
+	CloseHandle(CreateThread(NULL, 0, receive, NULL, 0, NULL));
+
 	DetourTransactionBegin();
 	DetourUpdateThread(GetCurrentThread());
 	DetourAttach((void **)&actual_recvfrom, my_recvfrom);
@@ -788,15 +878,6 @@ void load() {
 	DetourAttach((void **)&actual_CreateIoCompletionPort, my_CreateIoCompletionPort);
 	DetourTransactionCommit();
 
-	u_long relay_ip_net = htonl(relay_ip);
-	u_short relay_port_net = htons(relay_port);
-	relay_addr = (struct sockaddr_in){.sin_family = AF_INET, .sin_port = relay_port_net, .sin_addr.s_addr = relay_ip_net};
-
-	iocp = actual_CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 1);
-	sockets_mutex = CreateMutex(NULL, FALSE, NULL);
-	relay_thread = CreateThread(NULL, 0, relay, NULL, 0, NULL);
-	receive_thread = CreateThread(NULL, 0, receive, NULL, 0, NULL);
-
 	DEBUG_LOG("load_end")
 }
 
@@ -804,15 +885,7 @@ void unload() {
 	DEBUG_LOG("unload_start")
 
 	close = true;
-	WaitForSingleObject(sockets_mutex, INFINITE);
-	CloseHandle(relay_thread);
-	CloseHandle(receive_thread); // TODO is this the right place?
-	ReleaseMutex(sockets_mutex);
-	CloseHandle(sockets_mutex);
-	CloseHandle(iocp);
-	DEBUG_LOG("unload_free %zu %zu %zu", sockets_len, sockets_cap, (size_t)sockets)
-	free(sockets);
-	
+
 	DEBUG_LOG("unload_detours")
 	DetourTransactionBegin();
 	DetourUpdateThread(GetCurrentThread());
@@ -824,6 +897,21 @@ void unload() {
 	DetourDetach((void **)&actual_WSASendTo, my_WSASendTo);
 	DetourDetach((void **)&actual_CreateIoCompletionPort, my_CreateIoCompletionPort);
 	DetourTransactionCommit();
+	DEBUG_LOG("unload_detours done")
+
+	WaitForSingleObject(sockets_mutex, INFINITE);
+	ReleaseMutex(sockets_mutex);
+	CloseHandle(sockets_mutex);
+	DEBUG_LOG("unload_sockets %zu %zu %zu", sockets_len, sockets_cap, (size_t)sockets)
+	free(sockets);
+
+	WaitForSingleObject(pending_iocps_mutex, INFINITE);
+	ReleaseMutex(pending_iocps_mutex);
+	CloseHandle(pending_iocps_mutex);
+	DEBUG_LOG("unload_pending_iocps %zu %zu %zu", pending_iocps_len, pending_iocps_cap, (size_t)pending_iocps)
+	free(pending_iocps);
+
+	CloseHandle(iocp);
 
 	DEBUG_LOG("unload_end")
 	fclose(debug);
