@@ -69,29 +69,61 @@ int main(int argc, char **argv) {
 			.len = 2,
 		}};
 
-	DEBUG("cd: %d", WSAGetLastError())
+	struct sockaddr_in other;
+	int other_len = sizeof(other);
+
+	WSAEVENT event = WSACreateEvent();
+	WSAOVERLAPPED overlapped;
+	memset(&overlapped, 0, sizeof(overlapped));
+	overlapped.hEvent = event;
+
+	int key = 0xDD;
+	HANDLE iocp1 = my_CreateIoCompletionPort(s1, NULL, &key, 0);
+	HANDLE iocp2 = my_CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, NULL, 0);
+	iocp2 = my_CreateIoCompletionPort(s2, iocp2, &key, 0);
+
+	int flags = 0;
+	int n;
+	if (my_WSARecvFrom(s2, wsabuf, sizeof(wsabuf) / sizeof(*wsabuf), NULL, &flags, (struct sockaddr *)&other, &other_len, &overlapped, NULL) < 0
+		&& WSAGetLastError() != ERROR_IO_PENDING) {
+		FATAL("recvfrom: %d", WSAGetLastError())
+	}
+
+	int r = WSAGetOverlappedResult(s2, &overlapped, &n, false, &flags);
+	DEBUG("co %d %d", r, WSAGetLastError())
+
 	if (my_WSASendTo(s1, wsabuf, sizeof(wsabuf) / sizeof(*wsabuf), NULL, 0, (struct sockaddr *)&local2, sizeof(local2), NULL, NULL) < 0
 		&& WSAGetLastError() != ERROR_IO_PENDING) {
 		FATAL("sendto: %d", WSAGetLastError())
 	}
 
-	struct sockaddr_in other;
-	int other_len = sizeof(other);
+	WSAOVERLAPPED *_overlapped;
+	int err = 0;
+	int *_key;
+	r = GetQueuedCompletionStatus(iocp2, &n, (PULONG_PTR)&_key, (LPOVERLAPPED *)&_overlapped, INFINITE);
+	DEBUG("cq2 %d", r)
 
-	int flags = 0;
-	int n;
-	if (my_WSARecvFrom(s2, wsabuf, sizeof(wsabuf) / sizeof(*wsabuf), &n, &flags, (struct sockaddr *)&other, &other_len, NULL, cb) < 0
-		&& WSAGetLastError() != ERROR_IO_PENDING) {
-		FATAL("recvfrom: %d", WSAGetLastError())
-	}
+	r = GetQueuedCompletionStatus(iocp1, &n, (PULONG_PTR)&_key, (LPOVERLAPPED *)&_overlapped, INFINITE);
+	DEBUG("cq1 %d", r)
 
-	DEBUG("cc %d", SleepEx(INFINITE, true))
+
+	r = WSAWaitForMultipleEvents(1, &event, true, INFINITE, true);
+	DEBUG("cc %d", r)
+
+	r = WSAResetEvent(event);
+	DEBUG("cd %d", r)
+	r = WSAGetOverlappedResult(s2, &overlapped, &n, FALSE, &flags);
+	DEBUG("ce %d", r)
 
 	if (local1.sin_addr.S_un.S_addr != other.sin_addr.S_un.S_addr || local1.sin_port != other.sin_port) {
 		FATAL("recvfrom: unknown addr: %d %d", other.sin_addr.S_un.S_addr, other.sin_port)
 	}
 
 	if (my_closesocket(s1) < 0) {
+		FATAL("closesocket: %d", WSAGetLastError())
+	}
+
+	if (my_closesocket(s2) < 0) {
 		FATAL("closesocket: %d", WSAGetLastError())
 	}
 

@@ -7,3 +7,4 @@ CMakeSettings.json*
 /autopunch-loader/dll*.go
 /autopunch-loader/address.go
 *.syso
+out/
