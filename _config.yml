@@ -1,0 +1,8 @@
+theme: jekyll-theme-cayman
+plugins:
+  - jekyll-seo-tag
+title: "autopunch"
+description: "Play P2P games without forwarding ports!"
+url: "https://autopunch.delthas.fr/"
+downloads:
+  windows_64: "https://github.com/delthas/autopunch/releases/latest/download/autopunch.win64.exe"
