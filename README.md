@@ -8,7 +8,7 @@
 
 ## How to use
 
-- **Download the [latest version for Windows 64 bits](https://github.com/delthas/autopunch/releases/latest/download/autopunch.win64.exe) (use this link, not any other download button)**
+- **Download the latest version: for [Windows 64 bits](https://github.com/delthas/autopunch/releases/latest/download/autopunch.win64.exe) or [Windows 32 bits](https://github.com/delthas/autopunch/releases/latest/download/autopunch.win32.exe) (use one of these links, not any other download button)**
 - **Start your peer-to-peer game** *(for Touhou Hisoutensoku players: also run SokuRoll now, if needed)*
 - **Double-click the downloaded executable file to run it**; there is no setup or anything so put the file somewhere you'll remember (doesn't have to be in the game folder)
 - If a Windows Defender SmartScreen popup appears, click on "More information", then click on "Run anyway"
@@ -55,6 +55,6 @@ Build order:
 - build `packer` with Go; `go install` it / add it to your PATH;
 - build `inject.c` (at the root) with CMake four times: Debug and Release, for Visual C++ Build Tools x86 and x64; use the `autopunch_copy` target to put the DLLs in the right folder for next steps;
 - generate `loader` with: `go generate loader.go`;
-- build `loader`, targeting GOOS=windows GOARCH=amd64, with: `go build -ldflags="-H windowsgui -s -w -X main.version=<version>" -tags walk_use_cgo`; `version` is e.g. `v0.0.1`.
+- build `loader` twice, targeting GOARCH=amd64 then GOARCH=386, GOOS=windows, with: `go build -ldflags="-H windowsgui -s -w -X main.version=<version>" -tags walk_use_cgo`; `version` is e.g. `v0.0.1`.
 
 Building the relay (Go) is straightforward.

@@ -1,9 +1,10 @@
 // +build windows
-//go:generate rsrc -arch=amd64 -manifest loader.manifest -o rsrc.syso
+//go:generate rsrc -arch=amd64 -manifest loader.manifest -o rsrc_amd64.syso
+//go:generate rsrc -arch=386 -manifest loader.manifest -o rsrc_386.syso
 //go:generate packer autopunch.x86.dbg.dll dll86Dbg.go dllData86Dbg
-//go:generate packer autopunch.x64.dbg.dll dll64Dbg.go dllData64Dbg
+//go:generate packer autopunch.x64.dbg.dll dll64Dbg_amd64.go dllData64Dbg
 //go:generate packer autopunch.x86.rel.dll dll86Rel.go dllData86Rel
-//go:generate packer autopunch.x64.rel.dll dll64Rel.go dllData64Rel
+//go:generate packer autopunch.x64.rel.dll dll64Rel_amd64.go dllData64Rel
 //go:generate packer ..\autopunch-address\address.exe address.go addressData
 
 package main
@@ -27,6 +28,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -34,9 +36,9 @@ import (
 	"unicode/utf16"
 	"unsafe"
 
+	"github.com/akutz/sortfold"
 	"golang.org/x/sys/windows"
 
-	"github.com/akutz/sortfold"
 	"github.com/lxn/walk"
 	. "github.com/lxn/walk/declarative"
 
@@ -53,6 +55,22 @@ const (
 var processExcludes = []string{"explorer.exe", "firefox.exe", "cmd.exe", "mintty.exe"}
 var processPreferreds = []string{"th123.exe"}
 
+const PROCESSOR_ARCHITECTURE_AMD64 = 9
+
+type systeminfo struct {
+	wProcessorArchitecture      uint16
+	wReserved                   uint16
+	dwPageSize                  uint32
+	lpMinimumApplicationAddress uintptr
+	lpMaximumApplicationAddress uintptr
+	dwActiveProcessorMask       uintptr
+	dwNumberOfProcessors        uint32
+	dwProcessorType             uint32
+	dwAllocationGranularity     uint32
+	wProcessorLevel             uint16
+	wProcessorRevision          uint16
+}
+
 var (
 	dllKernel                     = windows.NewLazyDLL("kernel32.dll")
 	dllUser                       = windows.NewLazyDLL("user32.dll")
@@ -63,6 +81,7 @@ var (
 	procWriteProcessMemory        = dllKernel.NewProc("WriteProcessMemory")
 	procCreateRemoteThread        = dllKernel.NewProc("CreateRemoteThread")
 	procGetExitCodeThread         = dllKernel.NewProc("GetExitCodeThread")
+	procGetNativeSystemInfo       = dllKernel.NewProc("GetNativeSystemInfo")
 	procVerQueryValue             = dllVersions.NewProc("VerQueryValueW")
 	procGetFileVersionInfoSize    = dllVersions.NewProc("GetFileVersionInfoSizeW")
 	procGetFileVersionInfo        = dllVersions.NewProc("GetFileVersionInfoW")
@@ -339,42 +358,71 @@ func doInject(pid uint32, debug bool) (error, string) {
 	}
 	defer windows.CloseHandle(handleProcess)
 
-	var wow64 bool
-	err = windows.IsWow64Process(handleProcess, &wow64)
-	if err != nil {
-		return err, "Failed getting process bitness!"
+	var compile64 bool
+	var process64 bool
+	if runtime.GOARCH == "amd64" {
+		compile64 = true
+		var wow64 bool
+		err = windows.IsWow64Process(handleProcess, &wow64)
+		if err != nil {
+			return err, "Failed getting process bitness!"
+		}
+		process64 = !wow64
+	} else {
+		compile64 = false
+		var systeminfo systeminfo
+		_, _, _ = procGetNativeSystemInfo.Call(uintptr(unsafe.Pointer(&systeminfo)))
+		runtime64 := systeminfo.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64
+		if !runtime64 {
+			process64 = false
+		} else {
+			var wow64 bool
+			err = windows.IsWow64Process(handleProcess, &wow64)
+			if err != nil {
+				return err, "Failed getting process bitness!"
+			}
+			process64 = !wow64
+		}
 	}
+	if process64 && !compile64 {
+		return errors.New("this process is 64-bits and your autopunch version is 32-bits; please download autopunch 64-bits"), "Failed injecting process: wrong bitness!"
+	}
+
 	var loadLibraryAddr uintptr
 	var dllPath string
-	if wow64 {
-		f, err := ioutil.TempFile("", "address-*.exe")
-		if err != nil {
-			return err, "Failed opening temporary address process file!"
-		}
-		_, err = f.Write(addressData)
-		if err != nil {
-			return err, "Failed writing to temporary address process file!"
-		}
-		f.Close()
-		addressPath := f.Name()
+	if !process64 {
+		if compile64 {
+			f, err := ioutil.TempFile("", "address-*.exe")
+			if err != nil {
+				return err, "Failed opening temporary address process file!"
+			}
+			_, err = f.Write(addressData)
+			if err != nil {
+				return err, "Failed writing to temporary address process file!"
+			}
+			f.Close()
+			addressPath := f.Name()
 
-		cmd := exec.Command(addressPath, "kernel32.dll", "LoadLibraryW")
-		err = cmd.Start()
-		if err != nil {
-			return err, "Failed starting address process!"
-		}
-		err = cmd.Wait()
-		if exitErr, ok := err.(*exec.ExitError); !ok {
-			return err, "Failed running address process!"
+			cmd := exec.Command(addressPath, "kernel32.dll", "LoadLibraryW")
+			err = cmd.Start()
+			if err != nil {
+				return err, "Failed starting address process!"
+			}
+			err = cmd.Wait()
+			if exitErr, ok := err.(*exec.ExitError); !ok {
+				return err, "Failed running address process!"
+			} else {
+				code := exitErr.ExitCode()
+				if code == -1 {
+					return errors.New("address process failed to start (exit code -1)"), "Failed starting address process!"
+				}
+				if code == 0 {
+					return errors.New("address process failed finding address (exit code 0)"), "Failed finding library address!"
+				}
+				loadLibraryAddr = uintptr(code)
+			}
 		} else {
-			code := exitErr.ExitCode()
-			if code == -1 {
-				return errors.New("address process failed to start (exit code -1)"), "Failed starting address process!"
-			}
-			if code == 0 {
-				return errors.New("address process failed finding address (exit code 0)"), "Failed finding library address!"
-			}
-			loadLibraryAddr = uintptr(code)
+			loadLibraryAddr = dllKernel.NewProc("LoadLibraryW").Addr()
 		}
 
 		if os.Getenv("AUTOPUNCH_DLL_FILE") == "1" {
@@ -530,11 +578,20 @@ func update() bool {
 		}
 		return false
 	}
+	var assetName string
+	if runtime.GOARCH == "amd64" {
+		assetName = "autopunch.win64.exe"
+	} else {
+		assetName = "autopunch.win32.exe"
+	}
 	for _, v := range releases {
 		if v.TagName == version {
 			return false
 		}
 		for _, asset := range v.Assets {
+			if asset.Name != assetName {
+				continue
+			}
 			r, err = httpClient.Get(asset.DownloadUrl)
 			if err != nil {
 				dialog("Warning", "Error while downloading update.\nError: "+err.Error(), walk.MsgBoxIconWarning)
