@@ -8,7 +8,8 @@
 
 ## How to use
 
-- **Download the [latest version for Windows 64 bits](https://github.com/delthas/autopunch/releases/latest/download/autopunch.win64.exe)**
+- **Download the latest version: for [Windows 64 bits](https://github.com/delthas/autopunch/releases/latest/download/autopunch.win64.exe) or [Windows 
+32 bits](https://github.com/delthas/autopunch/releases/latest/download/autopunch.win32.exe)**
 - **Start your peer-to-peer game** *(for Touhou Hisoutensoku players: also run SokuRoll now, if needed)*
 - **Double-click the downloaded executable file to run it**; there is no setup or anything so put the file somewhere you'll remember (doesn't have to be in the game folder)
 - If a Windows Defender SmartScreen popup appears, click on "More information", then click on "Run anyway"

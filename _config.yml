@@ -6,3 +6,4 @@ description: "Play P2P games without forwarding ports!"
 url: "https://autopunch.delthas.fr/"
 downloads:
   windows_64: "https://github.com/delthas/autopunch/releases/latest/download/autopunch.win64.exe"
+  windows_32: "https://github.com/delthas/autopunch/releases/latest/download/autopunch.win32.exe"
