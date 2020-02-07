@@ -33,7 +33,7 @@
 	free(buf); \
 }
 
-const int relay_ip = (188 << 24) | (226 << 16) | (135 << 8) | 111;
+const wchar_t relay_host[] = L"delthas.fr";
 const int relay_port = 14763;
 struct sockaddr_in relay_addr;
 const char punch_payload[] = {0};
@@ -79,10 +79,38 @@ int(WINAPI *actual_sendto)(SOCKET s, const char *buf, int len, int flags, const 
 int(WINAPI *actual_bind)(SOCKET s, const struct sockaddr *name, int namelen) = bind;
 int(WINAPI *actual_closesocket)(SOCKET s) = closesocket;
 
+u_long get_relay_ip() {
+	ADDRINFOW hints;
+	ZeroMemory(&hints, sizeof(hints));
+	hints.ai_family = AF_INET;
+	hints.ai_socktype = SOCK_DGRAM;
+	hints.ai_protocol = IPPROTO_UDP;
+	ADDRINFOW *result = NULL;
+	DWORD r = GetAddrInfoW(relay_host, NULL, &hints, &result);
+	if(r != 0) {
+		DEBUG_LOG("getaddrinfow failed: %lu", r);
+		return 0;
+	}
+	for(ADDRINFOW *ptr = result; ptr != NULL; ptr = ptr->ai_next) {
+		if(ptr->ai_family == AF_INET) {
+			u_long address = ((struct sockaddr_in*)ptr->ai_addr)->sin_addr.s_addr;
+			FreeAddrInfoW(result);
+			DEBUG_LOG("getaddrinfow success: %lu", address);
+			return address;
+		}
+	}
+	FreeAddrInfoW(result);
+	DEBUG_LOG("getaddrinfow nothing: 0");
+	return 0;
+}
+
 DWORD WINAPI relay(void *data) {
 	while (!relay_close) {
 		WaitForSingleObject(sockets_mutex, INFINITE);
 		clock_t now = clock();
+		if(relay_addr.sin_addr.s_addr == 0) {
+			relay_addr.sin_addr.s_addr = get_relay_ip();
+		}
 		for (int i = 0; i < sockets_len; ++i) {
 			struct socket_data *socket_data = &sockets[i];
 			WaitForSingleObject(socket_data->mutex, INFINITE);
@@ -451,7 +479,7 @@ void load() {
 	DetourAttach((void **)&actual_closesocket, my_closesocket);
 	DetourTransactionCommit();
 
-	u_long relay_ip_net = htonl(relay_ip);
+	u_long relay_ip_net = get_relay_ip();
 	u_short relay_port_net = htons(relay_port);
 	relay_addr = (struct sockaddr_in){.sin_family = AF_INET, .sin_port = relay_port_net, .sin_addr.s_addr = relay_ip_net};
 
