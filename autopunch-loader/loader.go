@@ -75,6 +75,7 @@ var (
 	dllKernel                     = windows.NewLazyDLL("kernel32.dll")
 	dllUser                       = windows.NewLazyDLL("user32.dll")
 	dllVersions                   = windows.NewLazyDLL("version.dll")
+	dllPsApi                      = windows.NewLazyDLL("psapi.dll")
 	procQueryFullProcessImageName = dllKernel.NewProc("QueryFullProcessImageNameW")
 	procVirtualAllocEx            = dllKernel.NewProc("VirtualAllocEx")
 	procVirtualFreeEx             = dllKernel.NewProc("VirtualFreeEx")
@@ -82,6 +83,8 @@ var (
 	procCreateRemoteThread        = dllKernel.NewProc("CreateRemoteThread")
 	procGetExitCodeThread         = dllKernel.NewProc("GetExitCodeThread")
 	procGetNativeSystemInfo       = dllKernel.NewProc("GetNativeSystemInfo")
+	procEnumProcessModulesEx      = dllPsApi.NewProc("EnumProcessModulesEx")
+	procGetModuleFileNameEx       = dllPsApi.NewProc("GetModuleFileNameExW")
 	procVerQueryValue             = dllVersions.NewProc("VerQueryValueW")
 	procGetFileVersionInfoSize    = dllVersions.NewProc("GetFileVersionInfoSizeW")
 	procGetFileVersionInfo        = dllVersions.NewProc("GetFileVersionInfoW")
@@ -388,6 +391,33 @@ func doInject(pid uint32, debug bool) (error, string) {
 		return errors.New("this process is 64-bits and your autopunch version is 32-bits; please download autopunch 64-bits"), "Failed injecting process: wrong bitness!"
 	}
 
+	modules := make([]uintptr, 1024)
+	var modulesCount uint32
+	r, _, err := procEnumProcessModulesEx.Call(uintptr(handleProcess), uintptr(unsafe.Pointer(&modules[0])), uintptr(len(modules))*4, uintptr(unsafe.Pointer(&modulesCount)), 0x03 /* LIST_MODULES_ALL */)
+	if r == 0 {
+		return err, "Failed enumerating process modules!"
+	}
+	modules = modules[:modulesCount/4]
+	for _, module := range modules {
+		moduleUtf16 := make([]uint16, windows.MAX_PATH)
+		r, _, err = procGetModuleFileNameEx.Call(uintptr(handleProcess), module, uintptr(unsafe.Pointer(&moduleUtf16[0])), uintptr(len(moduleUtf16)))
+		if r == 0 {
+			return err, "Failed getting process module name!"
+		}
+		moduleNameLen := len(moduleUtf16)
+		for i, c := range moduleUtf16 {
+			if c == 0 {
+				moduleNameLen = i
+				break
+			}
+		}
+		moduleName := string(utf16.Decode(moduleUtf16[:moduleNameLen]))
+		fileName := filepath.Base(moduleName)
+		if strings.Contains(fileName, "autopunch") {
+			return nil, ""
+		}
+	}
+
 	var loadLibraryAddr uintptr
 	var dllPath string
 	if !process64 {
@@ -500,7 +530,7 @@ func doInject(pid uint32, debug bool) (error, string) {
 		return err, "Failed allocating memory in process!"
 	}
 	defer procVirtualFreeEx.Call(uintptr(handleProcess), dllAddr, 0, windows.MEM_RELEASE)
-	r, _, err := procWriteProcessMemory.Call(uintptr(handleProcess), dllAddr, uintptr(unsafe.Pointer(&dllPathC[0])), uintptr(len(dllPathC)*2), 0)
+	r, _, err = procWriteProcessMemory.Call(uintptr(handleProcess), dllAddr, uintptr(unsafe.Pointer(&dllPathC[0])), uintptr(len(dllPathC)*2), 0)
 	if r == 0 {
 		return err, "Failed writing to process memory!"
 	}
