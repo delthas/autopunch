@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/binary"
 	"flag"
-	"fmt"
 	"log"
 	"net"
 	"time"
@@ -19,14 +18,9 @@ type connection struct {
 
 var connections = make(map[[4]byte][]connection)
 
-const version = "0.0.1"
-
 const defaultPort = 14763
 
 func main() {
-	fmt.Println("autopunch relay v" + version)
-	fmt.Println()
-
 	var port int
 	flag.IntVar(&port, "port", defaultPort, "relay listen port")
 	flag.Parse()
@@ -46,17 +40,18 @@ func main() {
 		now := time.Now()
 		if now.Sub(flushTime) > flushInterval {
 			flushTime = now
-			for k, v := range connections {
+			for ip, v := range connections {
 				for i := 0; i < len(v); i++ {
 					c := v[i]
 					if now.Sub(c.time) > flushInterval {
+						log.Printf("clearing mapping: %d.%d.%d.%d:%d (nat=%d)", ip[0], ip[1], ip[2], ip[3], c.port, c.natPort)
 						v[i] = v[len(v)-1]
 						i--
 						v = v[:len(v)-1]
 					}
 				}
 				if len(v) == 0 {
-					delete(connections, k)
+					delete(connections, ip)
 				}
 			}
 		}
@@ -104,10 +99,12 @@ func main() {
 				}
 			}
 			if target == nil { // client sending to unknown address
+				log.Printf("client %d.%d.%d.%d:%d (nat=%d) requested unknown target: %d.%d.%d.%d:%d", senderIp[0], senderIp[1], senderIp[2], senderIp[3], senderPort, addr.Port, ip[0], ip[1], ip[2], ip[3], port)
 				continue
 			}
 
 			var payload [8]byte
+			log.Printf("client %d.%d.%d.%d:%d (nat=%d) requested target: %d.%d.%d.%d:%d (nat=%d)", senderIp[0], senderIp[1], senderIp[2], senderIp[3], senderPort, addr.Port, ip[0], ip[1], ip[2], ip[3], target.port, target.natPort)
 
 			// send nat mapping to client
 			payload[0] = byte(target.port >> 8)
@@ -139,6 +136,7 @@ func addConnection(ip [4]byte, port int, natPort int) {
 	} else {
 		v = c
 	}
+	log.Printf("setting mapping: %d.%d.%d.%d:%d (nat=%d)", ip[0], ip[1], ip[2], ip[3], port, natPort)
 	for i, c := range v {
 		if c.port != port {
 			continue

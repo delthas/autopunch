@@ -39,5 +39,5 @@ else()
     set(TARGET_FILE_BUILD rel)
 endif()
 
-add_custom_target(autopunch_copy DEPENDS autopunch COMMAND_EXPAND_LISTS VERBATIM
-        COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:autopunch> ${CMAKE_SOURCE_DIR}/autopunch-loader/autopunch.x${TARGET_FILE_BITS}.${TARGET_FILE_BUILD}.dll)
+add_custom_target(autopunch_copy ALL DEPENDS autopunch COMMAND_EXPAND_LISTS VERBATIM
+        COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:autopunch> ${CMAKE_SOURCE_DIR}/../autopunch-loader/autopunch.x${TARGET_FILE_BITS}.${TARGET_FILE_BUILD}.dll)

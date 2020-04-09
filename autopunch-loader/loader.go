@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
 	"math/rand"
 	"net"
 	"net/http"
@@ -142,6 +143,8 @@ type module struct {
 	win         map[uint32][]string // processId -> windows texts
 }
 
+var logErr = log.New(os.Stderr, "err: ", log.Lshortfile|log.Ldate|log.Ltime)
+
 //export enumWindowCallbackList
 func enumWindowCallbackList(handle unsafe.Pointer, data unsafe.Pointer) {
 	r, _, _ := procIsWindowVisible.Call(uintptr(handle))
@@ -150,32 +153,42 @@ func enumWindowCallbackList(handle unsafe.Pointer, data unsafe.Pointer) {
 	}
 	r, _, err := procGetWindowTextLength.Call(uintptr(handle))
 	if r == 0 {
-		if err == windows.ERROR_SUCCESS {
+		if err != windows.ERROR_SUCCESS {
+			logErr.Printf("GetWindowTextLength returned: %v", err)
 			return
 		}
-		panic(err)
+		return
 	}
 	l := int(r)
 	textUtf16 := make([]uint16, l+1)
 	r, _, err = procGetWindowText.Call(uintptr(handle), uintptr(unsafe.Pointer(&textUtf16[0])), uintptr(l+1))
 	if r == 0 {
-		if err == windows.ERROR_SUCCESS {
+		if err != windows.ERROR_SUCCESS {
+			logErr.Printf("GetWindowText returned: %v", err)
 			return
 		}
-		panic(err)
+		return
 	}
-	text := string(utf16.Decode(textUtf16[:l]))
+	textUtf16 = textUtf16[:l]
+	for i, c := range textUtf16 {
+		if c == 0 {
+			logErr.Printf("truncating NUL in window text string %v\n", string(utf16.Decode(textUtf16)))
+			textUtf16 = textUtf16[:i]
+			break
+		}
+	}
+	text := string(utf16.Decode(textUtf16))
 
 	var processId uint32
 	r, _, err = procGetWindowThreadProcessId.Call(uintptr(handle), uintptr(unsafe.Pointer(&processId)))
 	if r == 0 {
-		panic(err)
+		logErr.Printf("GetWindowThreadProcessId returned: %v", err)
 	}
 	wins := *(*map[uint32][]string)(unsafe.Pointer(data))
 	wins[processId] = append(wins[processId], text)
 }
 
-func refresh(model *processModel, lb *walk.ListBox) {
+func refresh(model *processModel, lb *walk.ListBox) error {
 	defer func() {
 		if r := recover(); r != nil {
 			dialog("Process listing failed", "Process listing failed! This should not happen.\nError: "+r.(error).Error(), walk.MsgBoxIconError)
@@ -188,19 +201,19 @@ func refresh(model *processModel, lb *walk.ListBox) {
 
 	r, _, err := procEnumWindows.Call(uintptr(C.cEnumWindowCallbackList), uintptr(unsafe.Pointer(&wins)))
 	if r == 0 {
-		panic(err)
+		return fmt.Errorf("could not enumerate windows: EnumWindows returned: %v", err)
 	}
 
 	handleSnapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
 	if err != nil {
-		panic(err)
+		return fmt.Errorf("could not enumerate processes: CreateToolhelp32Snapshot returned: %v", err)
 	}
 	entry := windows.ProcessEntry32{
 		Size: uint32(unsafe.Sizeof(windows.ProcessEntry32{})),
 	}
 	err = windows.Process32First(handleSnapshot, &entry)
 	if err != nil {
-		panic(err)
+		return fmt.Errorf("could not enumerate processes: Process32First returned: %v", err)
 	}
 outer:
 	for windows.Process32Next(handleSnapshot, &entry) == nil {
@@ -231,10 +244,19 @@ outer:
 		exePathUtf16 := make([]uint16, windows.MAX_PATH)
 		var exePathLen = uint32(len(exePathUtf16))
 		r, _, err = procQueryFullProcessImageName.Call(uintptr(handleProcess), 0, uintptr(unsafe.Pointer(&exePathUtf16[0])), uintptr(unsafe.Pointer(&exePathLen)))
-		if r == 0 {
-			panic(err)
-		}
 		windows.CloseHandle(handleProcess)
+		if r == 0 {
+			logErr.Printf("QueryFullProcessImageName returned: %v", err)
+			continue
+		}
+		exePathUtf16 = exePathUtf16[:exePathLen]
+		for i, c := range exePathUtf16 {
+			if c == 0 {
+				logErr.Printf("truncating NUL in process image name string %v\n", string(utf16.Decode(exePathUtf16)))
+				exePathUtf16 = exePathUtf16[:i]
+				break
+			}
+		}
 		exePath := string(utf16.Decode(exePathUtf16[:exePathLen]))
 
 		m, ok := modules[exePath]
@@ -251,7 +273,8 @@ outer:
 				versionData := make([]byte, l)
 				r, _, err = procGetFileVersionInfo.Call(uintptr(unsafe.Pointer(&exePathUtf16[0])), uintptr(unsafe.Pointer(&handle)), uintptr(l), uintptr(unsafe.Pointer(&versionData[0])))
 				if r == 0 {
-					panic(err)
+					logErr.Printf("GetFileVersionInfo returned for %s: %v", exeName, err)
+					continue
 				}
 				var lang *struct {
 					language uint16
@@ -265,14 +288,23 @@ outer:
 					var descriptionUtf16 *uint16
 					r, _, err = procVerQueryValue.Call(uintptr(unsafe.Pointer(&versionData[0])), uintptr(unsafe.Pointer(&subBlock[0])), uintptr(unsafe.Pointer(&descriptionUtf16)), uintptr(unsafe.Pointer(&blockLen)))
 					if r != 0 && blockLen > 1 {
-						description := string(utf16.Decode(*(*[]uint16)(unsafe.Pointer(&reflect.SliceHeader{
+						descriptionUtf16Arr := *(*[]uint16)(unsafe.Pointer(&reflect.SliceHeader{
 							Data: uintptr(unsafe.Pointer(descriptionUtf16)),
 							Len:  int(blockLen - 1),
 							Cap:  int(blockLen - 1),
-						}))))
+						}))
+						for i, c := range descriptionUtf16Arr {
+							if c == 0 {
+								fmt.Printf("truncating NUL in exe name string for %s in %v\n", exeName, string(utf16.Decode(descriptionUtf16Arr)))
+								descriptionUtf16Arr = descriptionUtf16Arr[:i]
+								break
+							}
+						}
+						description := string(utf16.Decode(descriptionUtf16Arr))
 						m.description = description
 					}
 				}
+				runtime.KeepAlive(&versionData)
 			}
 			if m.description == "" {
 				m.description = exeName
@@ -312,6 +344,7 @@ outer:
 			lb.SetCurrentIndex(0)
 		}
 	})
+	return nil
 }
 
 func inject(pid uint32, debug bool) {
@@ -404,14 +437,13 @@ func doInject(pid uint32, debug bool) (error, string) {
 		if r == 0 {
 			return err, "Failed getting process module name!"
 		}
-		moduleNameLen := len(moduleUtf16)
 		for i, c := range moduleUtf16 {
 			if c == 0 {
-				moduleNameLen = i
+				moduleUtf16 = moduleUtf16[:i]
 				break
 			}
 		}
-		moduleName := string(utf16.Decode(moduleUtf16[:moduleNameLen]))
+		moduleName := string(utf16.Decode(moduleUtf16))
 		fileName := filepath.Base(moduleName)
 		if strings.Contains(fileName, "autopunch") {
 			return nil, ""
@@ -741,6 +773,12 @@ var autopunchPath string
 var mw *walk.MainWindow
 
 func main() {
+	if version == "" {
+		version = customVersion
+	}
+
+	fmt.Println("autopunch " + version + " (by delthas)")
+
 	rand.Seed(time.Now().UnixNano())
 	exe, err := os.Executable()
 	if err != nil {
@@ -764,10 +802,6 @@ func main() {
 
 	var cb *walk.CheckBox
 	var lb *walk.ListBox
-
-	if version == "" {
-		version = customVersion
-	}
 
 	err = MainWindow{
 		AssignTo: &mw,
@@ -822,11 +856,17 @@ func main() {
 			}
 		}
 
-		refresh(model, lb)
 		mw.Synchronize(func() {
 			mw.SetVisible(true)
 		})
+		err := refresh(model, lb)
+		if err != nil {
+			panic(err)
+		}
 	}()
 
-	mw.Run()
+	r := mw.Run()
+	if r != 0 {
+		os.Exit(r)
+	}
 }

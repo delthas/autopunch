@@ -34,7 +34,7 @@
 ## Building
 
 Quick overview of the components of the project:
-- `inject.c`: the core autopunch DLL, that is injected into a game; has both 32 and 64 bit versions, release and debug versions;
+- `inject`: the core autopunch DLL, that is injected into a game; has both 32 and 64 bit versions, release and debug versions;
 - `address`: a tiny program to get the address of the `LoadLibraryW` function of the WoW `Kernel32` module; this works because ASLR is only done once per reboot;
 - `packer`: a tiny program to pack a binary file as a string in a Go source file so that it can be included in an executable;
 - `relay`: the STUN-like relay used by autopunch;
@@ -53,8 +53,8 @@ Preparation:
 Build order:
 - build `address` with CMake, compiling with `i686-w64-mingw32-gcc`, profile MinSizeRel;
 - build `packer` with Go; `go install` it / add it to your PATH;
-- build `inject.c` (at the root) with CMake four times: Debug and Release, for Visual C++ Build Tools x86 and x64; use the `autopunch_copy` target to put the DLLs in the right folder for next steps;
+- build `inject` with CMake four times: Debug and Release, for Visual C++ Build Tools x86 and x64; use the `autopunch_copy` target to put the DLLs in the right folder for next steps;
 - generate `loader` with: `go generate loader.go`;
-- build `loader` twice, targeting GOARCH=amd64 then GOARCH=386, GOOS=windows, with: `go build -ldflags="-H windowsgui -s -w -X main.version=<version>" -tags walk_use_cgo`; `version` is e.g. `v0.0.1`.
+- build `loader` twice, targeting GOARCH=amd64 then GOARCH=386, GOOS=windows, with: `go build -ldflags="-H windowsgui -s -w -X main.version=<version>"`; `version` is e.g. `v0.0.1`.
 
 Building the relay (Go) is straightforward.
