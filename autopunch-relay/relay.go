@@ -48,6 +48,7 @@ func main() {
 						v[i] = v[len(v)-1]
 						i--
 						v = v[:len(v)-1]
+						connections[ip] = v
 					}
 				}
 				if len(v) == 0 {
