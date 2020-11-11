@@ -155,7 +155,7 @@ DWORD WINAPI relay(void *data) {
 					continue;
 				}
 				clock_t wait_send = (now - mapping->last_send) / CLOCKS_PER_SEC;
-				if (mapping->refresh && (mapping->last_send == 0 || wait_send > 1)) { // refresh mapping
+				if (mapping->refresh && (mapping->last_send == 0 || wait_send >= 1)) { // refresh mapping
 					DEBUG_LOG("mapping refresh, send payload: socket=%zu socket_i=%d mapping_j=%d wait_send=%ld", socket_data->s, i, j, wait_send)
 					actual_sendto(socket_data->s, punch_payload, sizeof(punch_payload), 0, (struct sockaddr *)&mapping->addr, sizeof(mapping->addr));
 					mapping->last_send = clock();
