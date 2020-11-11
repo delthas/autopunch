@@ -155,7 +155,7 @@ DWORD WINAPI relay(void *data) {
 					continue;
 				}
 				clock_t wait_send = (now - mapping->last_send) / CLOCKS_PER_SEC;
-				if (mapping->refresh && wait_send > 1) { // refresh mapping
+				if (mapping->refresh && (mapping->last_send == 0 || wait_send > 1)) { // refresh mapping
 					DEBUG_LOG("mapping refresh, send payload: socket=%zu socket_i=%d mapping_j=%d wait_send=%ld", socket_data->s, i, j, wait_send)
 					actual_sendto(socket_data->s, punch_payload, sizeof(punch_payload), 0, (struct sockaddr *)&mapping->addr, sizeof(mapping->addr));
 					mapping->last_send = clock();
@@ -221,7 +221,7 @@ int WINAPI my_recvfrom(SOCKET s, char *out_buf, int len, int flags, struct socka
 				DEBUG_ADDR("updating mapping port: socket=%zu new_nat_port=%d internal_port=%d for ", &mapping->addr, s, ntohs(port_nat), ntohs(port_internal))
 				mapping->addr.sin_port = port_nat;
 				mapping->last_refresh = now;
-				mapping->last_send = now;
+				mapping->last_send = 0;
 				goto outer;
 			}
 			if (socket_data->mappings_len == socket_data->mappings_cap) {
@@ -236,7 +236,7 @@ int WINAPI my_recvfrom(SOCKET s, char *out_buf, int len, int flags, struct socka
 				},
 				.port = port_internal,
 				.last_refresh = now,
-				.last_send = now,
+				.last_send = 0,
 				.refresh = true,
 			};
 			DEBUG_ADDR("adding mapping: socket=%zu mappings_len=%zu mappings_cap=%zu internal_port=%d for ",
