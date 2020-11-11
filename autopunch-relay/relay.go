@@ -83,23 +83,21 @@ func main() {
 
 			var ip [4]byte
 			copy(ip[:], buffer[2:6])
-			v, ok := connections[ip]
-			if !ok {
-				continue
-			}
 			port := int(binary.BigEndian.Uint16(buffer[6:8]))
 
 			var target *connection
 
-			for _, conn := range v {
-				if conn.port == port { // client sending to internal server port
-					target = &conn
-				}
-			}
-			if target == nil {
+			if v, ok := connections[ip]; ok {
 				for _, conn := range v {
-					if conn.natPort == port { // client sending to external server port
+					if conn.port == port { // client sending to internal server port
 						target = &conn
+					}
+				}
+				if target == nil {
+					for _, conn := range v {
+						if conn.natPort == port { // client sending to external server port
+							target = &conn
+						}
 					}
 				}
 			}
