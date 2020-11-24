@@ -9,6 +9,11 @@ set(CMAKE_C_STANDARD 11)
 # DETOURS_OPTION_PROCESSOR=X86
 # DETOURS_OPTION_BITS=32
 
+set(AUTOPUNCH_VERSION "0.0.0.42" CACHE "STRING" "autopunch output DLL file version")
+string(REPLACE "." ", " AUTOPUNCH_VERSION_COMMA "${AUTOPUNCH_VERSION}")
+configure_file(inject_version.rc.in inject_version.rc
+        @ONLY NEWLINE_STYLE CRLF)
+
 add_library(autopunch MODULE
         detours/src/detours.cpp
         detours/src/modules.cpp
@@ -20,10 +25,11 @@ add_library(autopunch MODULE
         detours/src/disolia64.cpp
         detours/src/disolarm.cpp
         detours/src/disolarm64.cpp
-        inject.c)
+        inject.c
+        ${CMAKE_CURRENT_BINARY_DIR}/inject_version.rc)
 target_include_directories(autopunch PRIVATE detours/src)
-target_link_libraries(autopunch PRIVATE ws2_32)
-target_compile_definitions(autopunch PRIVATE -DWIN32_LEAN_AND_MEAN -D_CRT_SECURE_NO_WARNINGS)
+target_link_libraries(autopunch PRIVATE shlwapi ws2_32)
+target_compile_definitions(autopunch PRIVATE -DWIN32_LEAN_AND_MEAN -D_CRT_SECURE_NO_WARNINGS -DAUTOPUNCH_VERSION=${AUTOPUNCH_VERSION})
 target_compile_options(autopunch PRIVATE
         "$<$<CONFIG:DEBUG>:/MTd>"
         "$<$<NOT:$<CONFIG:DEBUG>>:/MT>")

@@ -3,12 +3,16 @@
 #include <winsock2.h>
 #include <detours.h>
 #include <shlobj.h>
+#include <shlwapi.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
 #include <ws2tcpip.h>
+
+#define STR_(a) #a
+#define STR(a) STR_(a)
 
 #ifndef NDEBUG
 #define DEBUG 1
@@ -66,6 +70,9 @@ struct socket_data {
 	size_t transient_peers_len;
 	size_t transient_peers_cap;
 };
+
+bool started;
+HANDLE singleton_mutex;
 
 struct socket_data *sockets;
 size_t sockets_len;
@@ -448,6 +455,20 @@ int WINAPI my_closesocket(SOCKET s) {
 	return r;
 }
 
+bool running() {
+	DWORD pid = GetProcessId(GetCurrentProcess());
+	wchar_t mutex_name[MAX_PATH];
+	_snwprintf(mutex_name, MAX_PATH, L"autopunch-singleton-%lu", pid);
+	singleton_mutex = OpenMutexW(MUTEX_ALL_ACCESS, false, mutex_name);
+	if (singleton_mutex != NULL) {
+		singleton_mutex = NULL;
+		CloseHandle(singleton_mutex);
+		return true;
+	}
+	singleton_mutex = CreateMutexW(NULL, false, mutex_name);
+	return false;
+}
+
 void load() {
 	if (DEBUG) {
 		srand(time(NULL));
@@ -456,10 +477,17 @@ void load() {
 		wchar_t *path = malloc((MAX_PATH + 1) * 2);
 		_snwprintf(path, MAX_PATH + 1, L"%ls\\inject.%d.log", desktop_path, rand() % 1000000);
 		free(desktop_path);
-		WARN(L"Injected autopunch with debug!\nPath to debug is: %ls", path)
+		WARN(L"Injected autopunch v" STR(AUTOPUNCH_VERSION) " with debug!\nPath to debug is: %ls", path)
 		debug = _wfopen(path, L"w");
+		DEBUG_LOG("starting autopunch v" STR(AUTOPUNCH_VERSION))
 		free(path);
 	}
+
+	if (running()) {
+		DEBUG_LOG("already running, quitting")
+		return;
+	}
+	started = true;
 
 	DEBUG_LOG("load_start")
 
@@ -484,22 +512,26 @@ void load() {
 void unload() {
 	DEBUG_LOG("unload_start")
 
-	relay_close = true;
-	WaitForSingleObject(sockets_mutex, INFINITE);
-	CloseHandle(relay_thread);
-	ReleaseMutex(sockets_mutex);
-	CloseHandle(sockets_mutex);
-	DEBUG_LOG("unload free sockets: %zu %zu %zu", sockets_len, sockets_cap, (size_t)sockets)
-	free(sockets);
+	if (started) {
+		started = false;
+		relay_close = true;
+		ReleaseMutex(singleton_mutex);
+		CloseHandle(singleton_mutex);
+		WaitForSingleObject(sockets_mutex, INFINITE);
+		CloseHandle(relay_thread);
+		CloseHandle(sockets_mutex);
+		DEBUG_LOG("unload free sockets: %zu %zu %zu", sockets_len, sockets_cap, (size_t)sockets)
+		free(sockets);
 
-	DEBUG_LOG("unload_detours")
-	DetourTransactionBegin();
-	DetourUpdateThread(GetCurrentThread());
-	DetourDetach((void **)&actual_recvfrom, my_recvfrom);
-	DetourDetach((void **)&actual_sendto, my_sendto);
-	DetourDetach((void **)&actual_bind, my_bind);
-	DetourDetach((void **)&actual_closesocket, my_closesocket);
-	DetourTransactionCommit();
+		DEBUG_LOG("unload_detours")
+		DetourTransactionBegin();
+		DetourUpdateThread(GetCurrentThread());
+		DetourDetach((void **)&actual_recvfrom, my_recvfrom);
+		DetourDetach((void **)&actual_sendto, my_sendto);
+		DetourDetach((void **)&actual_bind, my_bind);
+		DetourDetach((void **)&actual_closesocket, my_closesocket);
+		DetourTransactionCommit();
+	}
 
 	DEBUG_LOG("unload_end")
 	fclose(debug);
