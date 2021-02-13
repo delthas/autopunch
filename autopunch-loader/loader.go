@@ -731,16 +731,29 @@ func update() bool {
 				}
 			}
 			if err != nil {
-				dialog("Warning", "Error while updating, when moving current file.\nError: "+err.Error(), walk.MsgBoxIconWarning)
-				return false
+				for i := 0; i < 10; i++ {
+					renamePath = filepath.Join(filepath.Dir(autopunchPath), "autopunch.old."+strconv.Itoa(1000000000 + rand.Intn(1000000000))[1:]+".exe")
+					err = os.Rename(autopunchPath, renamePath)
+					if err == nil {
+						break
+					}
+				}
+				if err != nil {
+					dialog("Warning", "Error while updating, when moving current file.\nError: "+err.Error(), walk.MsgBoxIconWarning)
+					return false
+				}
 			}
 
 			err = os.Rename(f.Name(), autopunchPath)
 			if err != nil {
-				// try moving the old file back in case of error
-				_ = os.Rename(renamePath, autopunchPath)
-				dialog("Warning", "Error while updating, when moving downloaded file.\nError: "+err.Error(), walk.MsgBoxIconWarning)
-				return false
+				err = moveFile(f.Name(), autopunchPath)
+				if err != nil {
+					// try moving the old file back in case of error
+					_ = os.Rename(renamePath, autopunchPath)
+					dialog("Warning", "Error while updating, when moving downloaded file.\nError: "+err.Error(), walk.MsgBoxIconWarning)
+					return false
+				}
+				time.Sleep(500 * time.Millisecond)
 			}
 
 			go func() {
@@ -794,8 +807,9 @@ func main() {
 	}
 
 	if oldPath := os.Getenv("AUTOPUNCH_OLD"); oldPath != "" {
+		time.Sleep(500 * time.Millisecond)
 		// cleanup old update file, ignore error
-		_ = os.Remove(oldPath)
+		os.Remove(oldPath)
 	}
 
 	model := &processModel{}
@@ -869,4 +883,27 @@ func main() {
 	if r != 0 {
 		os.Exit(r)
 	}
+}
+
+func moveFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+
+	out, err := os.Create(dst)
+	if err != nil {
+		in.Close()
+		return err
+	}
+
+	_, err = io.Copy(out, in)
+	out.Close()
+	in.Close()
+	if err != nil {
+		return err
+	}
+
+	os.Remove(src)
+	return nil
 }
