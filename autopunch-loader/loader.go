@@ -1,11 +1,11 @@
 // +build windows
 //go:generate rsrc -arch=amd64 -manifest loader.manifest -o rsrc_amd64.syso
 //go:generate rsrc -arch=386 -manifest loader.manifest -o rsrc_386.syso
-//go:generate packer autopunch.x86.dbg.dll dll86Dbg.go dllData86Dbg
-//go:generate packer autopunch.x64.dbg.dll dll64Dbg_amd64.go dllData64Dbg
-//go:generate packer autopunch.x86.rel.dll dll86Rel.go dllData86Rel
-//go:generate packer autopunch.x64.rel.dll dll64Rel_amd64.go dllData64Rel
-//go:generate packer ..\autopunch-address\address.exe address.go addressData
+//go:generate autopunch-packer autopunch.x86.dbg.dll dll86Dbg.go dllData86Dbg
+//go:generate autopunch-packer autopunch.x64.dbg.dll dll64Dbg_amd64.go dllData64Dbg
+//go:generate autopunch-packer autopunch.x86.rel.dll dll86Rel.go dllData86Rel
+//go:generate autopunch-packer autopunch.x64.rel.dll dll64Rel_amd64.go dllData64Rel
+//go:generate autopunch-packer ..\autopunch-address\address.exe address.go addressData
 
 package main
 
