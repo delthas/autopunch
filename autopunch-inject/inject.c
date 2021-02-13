@@ -178,14 +178,28 @@ DWORD WINAPI relay(void *data) {
 	}
 }
 
-int WINAPI my_recvfrom(SOCKET s, char *out_buf, int len, int flags, struct sockaddr *from_original, int *fromlen) {
-	struct sockaddr_in *from = (struct sockaddr_in *)from_original;
+int WINAPI my_recvfrom(SOCKET s, char *out_buf, int len, int flags, struct sockaddr *from_original, int *fromlen_original) {
 	struct socket_data *socket_data = get_socket_data(s);
 	if (!socket_data) {
 		DEBUG_LOG("ignoring unknown socket: socket=%zu", s)
-		return actual_recvfrom(s, out_buf, len, flags, from_original, fromlen); // TODO error?
+		return actual_recvfrom(s, out_buf, len, flags, from_original, fromlen_original); // TODO error?
 	}
 
+	struct sockaddr_in from_backing;
+	struct sockaddr_in *from;
+	if (!from_original) {
+		from = &from_backing;
+	} else {
+		from = (struct sockaddr_in *)from_original;
+	}
+	int fromlen_backing;
+	int *fromlen;
+	if (!fromlen_original) {
+		fromlen = &fromlen_backing;
+		fromlen_backing = sizeof(from_backing);
+	} else {
+		fromlen = fromlen_original;
+	}
 	char buf_backing[8];
 	char *buf;
 	if (len < 8) {
@@ -195,7 +209,7 @@ int WINAPI my_recvfrom(SOCKET s, char *out_buf, int len, int flags, struct socka
 	}
 	DEBUG_LOG("starting receive: socket=%zu len=%d flags=%d", s, len, flags)
 	while (true) {
-		int n = actual_recvfrom(s, buf, len > 8 ? len : 8, flags, from_original, fromlen);
+		int n = actual_recvfrom(s, buf, len > 8 ? len : 8, flags, from, fromlen);
 		if (n < 0) {
 			int err = WSAGetLastError();
 			if (err == WSAECONNRESET) { // ignore connection reset errors (can happen if relay is down)
