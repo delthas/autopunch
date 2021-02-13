@@ -217,7 +217,7 @@ int WINAPI my_recvfrom(SOCKET s, char *out_buf, int len, int flags, struct socka
 				continue;
 			}
 			DEBUG_LOG("recvfrom returned error: err=%d", err)
-			return err;
+			return n;
 		}
 		DEBUG_ADDR("recvfrom success: n=%d from=", from, n)
 		if (from->sin_addr.s_addr == relay_addr.sin_addr.s_addr && from->sin_port == relay_addr.sin_port) {
