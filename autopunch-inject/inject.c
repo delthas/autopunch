@@ -548,7 +548,9 @@ void unload() {
 	}
 
 	DEBUG_LOG("unload_end")
-	fclose(debug);
+	if(debug) {
+		fclose(debug);
+	}
 }
 
 BOOL WINAPI DllMain(HINSTANCE hinst, DWORD dwReason, LPVOID reserved) {
